@@ -653,43 +653,16 @@ def nut00b(date1, date2):
 # ============================================================================
 
 def _load_nut00a_tables():
-    """Load the IAU 2000A nutation coefficient tables from the ERFA C source.
+    """Load the IAU 2000A nutation coefficient tables from pre-saved .npy files.
 
-    We read the tables directly from the C source file and cache them as JAX arrays.
-    This avoids duplicating the ~1365 rows of coefficients in Python.
+    Returns (lunisolar, planetary) as JAX arrays with shapes (678, 11) and (687, 17).
     """
-    import re
     import os
     import numpy as np
 
-    src_path = os.path.join(os.path.dirname(__file__), '..', '_data', 'nut00a.c')
-    src_path = os.path.normpath(src_path)
-
-    with open(src_path, 'r') as f:
-        source = f.read()
-
-    # Parse luni-solar table (xls[])
-    # Find the block between "xls[]" declaration and its closing "};"
-    xls_match = re.search(r'}\s+xls\[\]\s*=\s*\{(.*?)\};', source, re.DOTALL)
-    xls_text = xls_match.group(1)
-    xls_rows = re.findall(r'\{([^}]+)\}', xls_text)
-
-    xls_data = []
-    for row in xls_rows:
-        vals = [float(v.strip()) for v in row.split(',')]
-        xls_data.append(vals)
-    xls_arr = np.array(xls_data, dtype=np.float64)
-
-    # Parse planetary table (xpl[])
-    xpl_match = re.search(r'}\s+xpl\[\]\s*=\s*\{(.*?)\};', source, re.DOTALL)
-    xpl_text = xpl_match.group(1)
-    xpl_rows = re.findall(r'\{([^}]+)\}', xpl_text)
-
-    xpl_data = []
-    for row in xpl_rows:
-        vals = [float(v.strip()) for v in row.split(',')]
-        xpl_data.append(vals)
-    xpl_arr = np.array(xpl_data, dtype=np.float64)
+    data_dir = os.path.join(os.path.dirname(__file__), '..', '_data')
+    xls_arr = np.load(os.path.join(data_dir, 'nut00a_lunisolar.npy'))
+    xpl_arr = np.load(os.path.join(data_dir, 'nut00a_planetary.npy'))
 
     return jnp.array(xls_arr), jnp.array(xpl_arr)
 

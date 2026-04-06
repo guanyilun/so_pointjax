@@ -1,11 +1,11 @@
 """Ephemeris functions, ported from ERFA C library.
 
-The epv00 coefficients are parsed from the original C source file at runtime.
+The epv00 coefficients are loaded from pre-computed .npy files.
 """
 
 import os
-import re
 
+import numpy as np
 import jax.numpy as jnp
 
 from so_pointjax.erfa._core.constants import DJ00, DJY, DJC, DJM, DD2R, DAS2R, DAU, D2PI
@@ -19,16 +19,13 @@ _EPV00_TABLES = None
 
 
 def _load_epv00_tables():
-    """Parse epv00 coefficient arrays from the C source file."""
+    """Load epv00 coefficient arrays from .npy files."""
     global _EPV00_TABLES
     if _EPV00_TABLES is not None:
         return _EPV00_TABLES
 
-    src_path = os.path.join(os.path.dirname(__file__), '..', '_data', 'epv00.c')
-    with open(src_path, 'r') as f:
-        src = f.read()
+    data_dir = os.path.join(os.path.dirname(__file__), '..', '_data')
 
-    # Parse all 18 coefficient arrays
     array_names = [
         'e0x', 'e0y', 'e0z',
         'e1x', 'e1y', 'e1z',
@@ -40,18 +37,8 @@ def _load_epv00_tables():
 
     tables = {}
     for name in array_names:
-        # Match: static const double name[] = { ... };
-        pattern = r'static\s+const\s+double\s+' + name + r'\[\]\s*=\s*\{([^}]+)\}'
-        m = re.search(pattern, src)
-        if m is None:
-            raise RuntimeError(f"Could not find array {name} in epv00.c")
-        body = m.group(1)
-        # Extract all numbers
-        nums = re.findall(r'[-+]?\d+\.\d+[eE][-+]?\d+|[-+]?\d+\.\d+', body)
-        coeffs = [float(x) for x in nums]
-        # Reshape into (n, 3) for (amplitude, phase, frequency) triplets
-        n = len(coeffs) // 3
-        tables[name] = jnp.array(coeffs).reshape(n, 3)
+        path = os.path.join(data_dir, f'epv00_{name}.npy')
+        tables[name] = jnp.array(np.load(path))
 
     _EPV00_TABLES = tables
     return tables
