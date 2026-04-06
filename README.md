@@ -148,6 +148,18 @@ python -m so_pointjax.proj.benchmarks.bench_quat_array [--quick]
 python -m so_pointjax.qpoint.benchmarks.bench_pointing [--quick]
 ```
 
+## Acknowledgments
+
+This package is a JAX reimplementation of algorithms from:
+
+- [ERFA](https://github.com/liberfa/erfa) (NumFOCUS Foundation),
+  derived from the IAU's [SOFA](http://www.iausofa.org) library
+- [qpoint](https://github.com/arahlin/qpoint) (Alexandra Rahlin)
+- [so3g](https://github.com/simonsobs/so3g) (Simons Observatory)
+- [HEALPix](https://healpix.sourceforge.io/) (Gorski et al.)
+
+See [NOTICE](NOTICE) for full license texts of the upstream libraries.
+
 ## License
 
-BSD-3-Clause
+BSD-3-Clause. See [LICENSE](LICENSE).
