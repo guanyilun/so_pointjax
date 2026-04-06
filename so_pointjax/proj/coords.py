@@ -64,6 +64,58 @@ DEFAULT_SITE = 'so'
 
 
 # ---------------------------------------------------------------------------
+# JIT-compiled computation kernels
+# ---------------------------------------------------------------------------
+
+@jax.jit
+def _naive_az_el_compute(t, az, el, roll, site_lon_rad, site_lat_rad):
+    """Fused naive pointing: all quaternion ops compiled into one kernel."""
+    J = (t - ERA_EPOCH) / 86400.0
+    era = jnp.polyval(ERA_POLY, J)
+    lst = era + site_lon_rad
+    return quat.qmul(
+        quat.qmul(
+            quat.qmul(
+                quat.euler(2, lst),
+                quat.euler(1, jnp.pi / 2 - site_lat_rad)),
+            quat.qmul(
+                quat.euler(2, jnp.pi + jnp.zeros_like(t)),
+                quat.euler(2, -az))),
+        quat.qmul(
+            quat.euler(1, jnp.pi / 2 - el),
+            quat.euler(2, roll + jnp.zeros_like(t))))
+
+
+@jax.jit
+def _for_lonlat_compute(lon, lat, psi):
+    """Fused lonlat→quaternion: all ops compiled into one kernel."""
+    return quat.qmul(
+        quat.qmul(
+            quat.euler(2, lon),
+            quat.euler(1, jnp.pi / 2 - lat)),
+        quat.euler(2, psi + jnp.zeros_like(lon)))
+
+
+@jax.jit
+def _for_horizon_compute(az, el, roll):
+    """Fused horizon→quaternion: all ops compiled into one kernel."""
+    return quat.qmul(
+        quat.qmul(
+            quat.euler(2, -az),
+            quat.euler(1, jnp.pi / 2 - el)),
+        quat.euler(2, roll))
+
+
+@jax.jit
+def _compute_coords_jit(Q, det_quats):
+    """Fused detector coordinate computation."""
+    def _det_coords(q_det):
+        q_total = quat.qmul(Q, q_det[None, :])
+        return _quats_to_lonlat(q_total)
+    return jax.vmap(_det_coords)(det_quats)
+
+
+# ---------------------------------------------------------------------------
 # CelestialSightLine
 # ---------------------------------------------------------------------------
 
@@ -119,24 +171,9 @@ class CelestialSightLine:
         az = jnp.asarray(az, dtype=jnp.float64)
         el = jnp.asarray(el, dtype=jnp.float64)
 
-        J = (t - ERA_EPOCH) / 86400.0
-        era = jnp.polyval(ERA_POLY, J)
-        lst = era + site.lon * DEG
-
         self = cls()
-        self.Q = (
-            quat.qmul(
-                quat.qmul(
-                    quat.qmul(
-                        quat.euler(2, lst),
-                        quat.euler(1, jnp.pi / 2 - site.lat * DEG)),
-                    quat.qmul(
-                        quat.euler(2, jnp.pi + jnp.zeros_like(t)),
-                        quat.euler(2, -az))),
-                quat.qmul(
-                    quat.euler(1, jnp.pi / 2 - el),
-                    quat.euler(2, roll + jnp.zeros_like(t))))
-        )
+        self.Q = _naive_az_el_compute(
+            t, az, el, roll, site.lon * DEG, site.lat * DEG)
         return self
 
     @classmethod
@@ -264,11 +301,10 @@ class CelestialSightLine:
         CelestialSightLine
         """
         self = cls()
-        self.Q = quat.qmul(
-            quat.qmul(
-                quat.euler(2, lon),
-                quat.euler(1, jnp.pi / 2 - lat)),
-            quat.euler(2, psi))
+        self.Q = _for_lonlat_compute(
+            jnp.asarray(lon, dtype=jnp.float64),
+            jnp.asarray(lat, dtype=jnp.float64),
+            jnp.asarray(psi, dtype=jnp.float64))
         return self
 
     @classmethod
@@ -289,20 +325,15 @@ class CelestialSightLine:
         CelestialSightLine
         """
         self = cls()
-        t = jnp.asarray(t, dtype=jnp.float64)
         az = jnp.asarray(az, dtype=jnp.float64)
         el = jnp.asarray(el, dtype=jnp.float64)
 
         if roll is None:
-            roll_val = jnp.zeros_like(t)
+            roll_val = jnp.zeros_like(az)
         else:
-            roll_val = jnp.asarray(roll, dtype=jnp.float64)
+            roll_val = jnp.asarray(roll, dtype=jnp.float64) + jnp.zeros_like(az)
 
-        self.Q = quat.qmul(
-            quat.qmul(
-                quat.euler(2, -az),
-                quat.euler(1, jnp.pi / 2 - el)),
-            quat.euler(2, roll_val))
+        self.Q = _for_horizon_compute(az, el, roll_val)
         return self
 
     def coords(self, fplane=None, output=None):
@@ -333,14 +364,8 @@ class CelestialSightLine:
         Q = self.Q
         was_scalar = (Q.ndim == 1)
         Q = jnp.atleast_2d(Q)        # (N, 4)
-        det_quats = fplane.quats      # (n_det, 4)
 
-        def _det_coords(q_det):
-            # q_total = Q_bore * q_det for each time sample
-            q_total = quat.qmul(Q, q_det[None, :])  # (N, 4)
-            return _quats_to_lonlat(q_total)
-
-        result = jax.vmap(_det_coords)(det_quats)  # (n_det, N, 4)
+        result = _compute_coords_jit(Q, fplane.quats)  # (n_det, N, 4)
         if was_scalar:
             result = result[:, 0, :]  # (n_det, 4) — squeeze time dimension
         return result
