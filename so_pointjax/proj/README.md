@@ -1,16 +1,15 @@
-# so3g_jax
+# so_pointjax.proj
 
-JAX reimplementation of `so3g.proj` for fast, differentiable telescope pointing.
+High-level API for differentiable telescope pointing, modeled after
+`so3g.proj`. Provides the `Quat` class with operator overloading,
+`CelestialSightLine` for boresight pointing, `FocalPlane` for detector
+layouts, and observatory site/weather configuration.
 
-All functions are compatible with `jax.jit`, `jax.grad`, and `jax.vmap`.
-Quaternion operations, coordinate transforms, and the full az/el → RA/Dec
-pointing pipeline can be differentiated end-to-end.
-
-## Quick start
+All classes are JAX pytrees and work with `jax.jit`, `jax.grad`, and `jax.vmap`.
 
 ```python
-import so3g_jax
-from so3g_jax import Quat, quat, CelestialSightLine, FocalPlane
+from so_pointjax.proj import Quat, CelestialSightLine, FocalPlane, Assembly
+from so_pointjax.proj import SITES, Weather, weather_factory
 import jax.numpy as jnp
 ```
 
@@ -28,7 +27,7 @@ q = Quat(jnp.array([1., 0., 0., 0.]))              # from array
 
 # Named constructors
 q = Quat.identity()                                 # (1, 0, 0, 0)
-q = Quat.from_euler(axis, angle)                     # axis ∈ {0, 1, 2}
+q = Quat.from_euler(axis, angle)                     # axis in {0, 1, 2}
 q = Quat.from_iso(theta, phi, psi)                   # Rz(phi) Ry(theta) Rz(psi)
 q = Quat.from_lonlat(lon, lat, psi=0.)               # celestial lon/lat
 q = Quat.from_lonlat(az, el, azel=True)              # horizon az/el
@@ -47,11 +46,11 @@ abs(q)           # norm (scalar or array of norms)
 -q               # negation
 2 * q            # scalar multiplication
 
-# Broadcasting: (4,) × (N, 4) → (N, 4)
-q_scalar * q_arr          # scalar × array
-q_arr * q_scalar          # array × scalar
-q_arr * ~q_arr            # element-wise → all identity
-q1_arr * q2_arr           # (N, 4) × (N, 4) element-wise
+# Broadcasting: (4,) x (N, 4) -> (N, 4)
+q_scalar * q_arr          # scalar x array
+q_arr * q_scalar          # array x scalar
+q_arr * ~q_arr            # element-wise -> all identity
+q1_arr * q2_arr           # (N, 4) x (N, 4) element-wise
 
 # Chaining
 q1 * q2 * q3              # left-to-right associativity
@@ -79,15 +78,15 @@ jnp.asarray(q)         # to JAX array
 ### Component access
 
 ```python
-q.a, q.b, q.c, q.d    # (w, x, y, z) — matches spt3g convention
+q.a, q.b, q.c, q.d    # (w, x, y, z) -- matches spt3g convention
 q.w, q.x, q.y, q.z    # aliases
 ```
 
 ### Indexing and slicing
 
 ```python
-q_arr[0]               # → scalar Quat
-q_arr[2:5]             # → batch Quat (3 elements)
+q_arr[0]               # -> scalar Quat
+q_arr[2:5]             # -> batch Quat (3 elements)
 q_arr[-1]              # last element
 len(q_arr)             # number of quaternions in batch
 ```
@@ -98,6 +97,8 @@ len(q_arr)             # number of quaternions in batch
 `jax.jit`, `jax.grad`, and `jax.vmap`:
 
 ```python
+import jax
+
 # JIT
 @jax.jit
 def compose(q1, q2):
@@ -119,7 +120,7 @@ The `quat` module provides the same operations as free functions operating
 on raw `jnp.ndarray` of shape `(4,)` or `(N, 4)`:
 
 ```python
-from so3g_jax import quat
+from so_pointjax.proj import quat
 
 # Construction
 quat.euler(axis, angle)
@@ -128,9 +129,9 @@ quat.rotation_lonlat(lon, lat, psi=0., azel=False)
 quat.rotation_xieta(xi, eta, gamma=0.)
 
 # Decomposition
-quat.decompose_iso(q)       # → (theta, phi, psi)
-quat.decompose_lonlat(q)    # → (lon, lat, psi)
-quat.decompose_xieta(q)     # → (xi, eta, gamma)
+quat.decompose_iso(q)       # -> (theta, phi, psi)
+quat.decompose_lonlat(q)    # -> (lon, lat, psi)
+quat.decompose_xieta(q)     # -> (xi, eta, gamma)
 
 # Arithmetic
 quat.qmul(a, b)             # quaternion product
@@ -147,7 +148,7 @@ quat.qrotate(q, v)          # rotate vector
 Carries a vector of celestial pointing quaternions (`self.Q`).
 
 ```python
-from so3g_jax import CelestialSightLine
+from so_pointjax.proj import CelestialSightLine
 
 # High-precision pointing (nutation, precession, aberration, refraction)
 csl = CelestialSightLine.az_el(t, az, el, site='act', weather='toco')
@@ -165,16 +166,18 @@ csl = CelestialSightLine.for_horizon(t, az, el)
 Arguments:
 - `t`: Unix timestamps (float or array)
 - `az`, `el`: azimuth and elevation in radians
-- `site`: observatory name (`'act'`, `'so'`, `'so_lat'`, `'so_sat1'`, `'so_sat2'`, `'so_sat3'`) or `EarthlySite` object
-- `weather`: atmosphere model (`'vacuum'`, `'toco'`, `'act'`, `'so'`, `'sa'`, `'typical'`) or `Weather` object
+- `site`: observatory name (`'act'`, `'so'`, `'so_lat'`, `'so_sat1'`,
+  `'so_sat2'`, `'so_sat3'`) or `EarthlySite` object
+- `weather`: atmosphere model (`'vacuum'`, `'toco'`, `'act'`, `'so'`,
+  `'sa'`, `'typical'`) or `Weather` object
 
 ### Extracting sky coordinates
 
 ```python
-# Boresight coordinates → (N, 4) array [lon, lat, cos2psi, sin2psi]
+# Boresight coordinates -> (N, 4) array [lon, lat, cos2psi, sin2psi]
 coords = csl.coords()
 
-# With focal plane → (n_det, N, 4)
+# With focal plane -> (n_det, N, 4)
 fp = FocalPlane.from_xieta(xi, eta)
 coords = csl.coords(fplane=fp)
 ```
@@ -184,7 +187,7 @@ coords = csl.coords(fplane=fp)
 Describes detector positions and polarization responses in the focal plane.
 
 ```python
-from so3g_jax import FocalPlane
+from so_pointjax.proj import FocalPlane
 
 # Single boresight detector
 fp = FocalPlane.boresight()
@@ -205,7 +208,7 @@ len(fp)              # same as fp.ndet
 Groups boresight pointing with detector offsets.
 
 ```python
-from so3g_jax import Assembly
+from so_pointjax.proj import Assembly
 
 asm = Assembly.attach(csl, fp)        # full assembly
 asm = Assembly.for_boresight(csl)     # boresight-only
@@ -214,7 +217,7 @@ asm = Assembly.for_boresight(csl)     # boresight-only
 ## Weather
 
 ```python
-from so3g_jax import Weather, weather_factory
+from so_pointjax.proj import Weather, weather_factory
 
 w = weather_factory('toco')           # preset: toco/act/so/sa/vacuum
 w = Weather({'temperature': 10., 'pressure': 600., 'humidity': 0.5})
@@ -223,7 +226,7 @@ w = Weather({'temperature': 10., 'pressure': 600., 'humidity': 0.5})
 ## Sites
 
 ```python
-from so3g_jax import SITES
+from so_pointjax.proj import SITES
 
 SITES['act']        # EarthlySite(lon=-67.7876, lat=-22.9585, elev=5188)
 SITES['so']         # alias for 'so_lat'
@@ -239,7 +242,7 @@ Each site has `lon` (degrees), `lat` (degrees), `elev` (meters), and
 ```python
 import jax
 import jax.numpy as jnp
-from so3g_jax import Quat, CelestialSightLine, FocalPlane
+from so_pointjax.proj import Quat, CelestialSightLine, FocalPlane
 
 def sky_lon(az, el):
     """Differentiable map from az/el to RA."""
@@ -264,32 +267,19 @@ and weather conditions (93 cross-validation tests):
 | Layer                        | Agreement            |
 |------------------------------|----------------------|
 | Quaternion functions         | Bit-identical        |
-| `naive_az_el`                | ~1e-12 (quat diff)  |
-| `az_el` (all weather/sites)  | 0.0004-0.0005 arcsec |
+| `naive_az_el`                | ~1e-12 (quat diff)   |
+| `az_el` (all weather/sites)  | 0.0004--0.0005 arcsec |
 | Detector projection          | ~1e-12               |
 
 ## Running tests
 
 ```bash
 # Core tests (no so3g dependency needed)
-python -m pytest so3g_jax/tests/test_quat.py so3g_jax/tests/test_coords.py -v
+python -m pytest so_pointjax/proj/tests/test_quat.py so_pointjax/proj/tests/test_coords.py -v
 
 # Cross-validation against so3g (requires so3g)
-python -m pytest so3g_jax/tests/test_cross_validation.py -v -s
+python -m pytest so_pointjax/proj/tests/test_cross_validation.py -v -s
 
-# All tests
-python -m pytest so3g_jax/tests/ -v
+# All proj tests
+python -m pytest so_pointjax/proj/tests/ -v
 ```
-
-## Performance benchmarks
-
-```bash
-python -m so3g_jax.benchmarks.bench_so3g [--quick]
-python -m so3g_jax.benchmarks.bench_quat_array [--quick]
-```
-
-Key results (CPU):
-- **Quaternion ops**: JAX JIT 1.3-7x faster at N >= 100K
-- **Pointing pipeline**: JAX JIT 3-8x faster across all sizes
-- **Bore x det composition**: JAX 2-3x faster for realistic focal planes
-- **Gradients**: ~1 us/sample (unique capability vs so3g)
