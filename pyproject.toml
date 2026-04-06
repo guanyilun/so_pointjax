@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "so-pointjax"
+version = "0.1.0"
+description = "Differentiable telescope pointing in JAX — ERFA, qpoint, and so3g.proj combined"
+readme = "README.md"
+license = "BSD-3-Clause"
+requires-python = ">=3.10"
+keywords = ["astronomy", "astrometry", "jax", "differentiable", "pointing", "telescope"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0", "pyerfa>=2.0"]
+
+[tool.setuptools.packages.find]
+include = ["so_pointjax*"]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "so_pointjax/erfa/tests",
+    "so_pointjax/qpoint/tests",
+    "so_pointjax/proj/tests",
+]
