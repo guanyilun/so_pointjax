@@ -662,7 +662,7 @@ def _load_nut00a_tables():
     import os
     import numpy as np
 
-    src_path = os.path.join(os.path.dirname(__file__), '..', '..', 'erfa', 'src', 'nut00a.c')
+    src_path = os.path.join(os.path.dirname(__file__), '..', '_data', 'nut00a.c')
     src_path = os.path.normpath(src_path)
 
     with open(src_path, 'r') as f:

@@ -24,7 +24,7 @@ def _load_epv00_tables():
     if _EPV00_TABLES is not None:
         return _EPV00_TABLES
 
-    src_path = os.path.join(os.path.dirname(__file__), '..', '..', 'erfa', 'src', 'epv00.c')
+    src_path = os.path.join(os.path.dirname(__file__), '..', '_data', 'epv00.c')
     with open(src_path, 'r') as f:
         src = f.read()
 
