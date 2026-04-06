@@ -28,6 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7.0", "pyerfa>=2.0"]
+crossval = ["pytest>=7.0", "pyerfa>=2.0", "qpoint>=1.12", "so3g>=0.2"]
 
 [tool.setuptools.packages.find]
 include = ["so_pointjax*"]
