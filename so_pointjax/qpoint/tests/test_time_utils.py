@@ -1,12 +1,15 @@
 """Tests for time conversion utilities."""
 
 import jax.numpy as jnp
-from numpy.testing import assert_allclose
+import numpy as np
+from numpy.testing import assert_allclose, assert_array_equal
 
+import so_pointjax.erfa
 from so_pointjax.qpoint._time_utils import (
-    ctime2jd, jd2ctime, ctime2jdtt, jdutc2jdut1, ctime2gmst,
+    ctime2jd, jd2ctime, ctime2jdtt, jdutc2jdut1, ctime2gmst, utc2tt_ut1,
     CTIME_JD_EPOCH,
 )
+from so_pointjax.qpoint._pointing import precompute_times
 
 
 class TestCtime2Jd:
@@ -82,3 +85,55 @@ class TestCtime2Gmst:
         """Full accuracy mode should not raise."""
         gmst = ctime2gmst(1700000000.0, dut1=0.05, accuracy=0)
         assert jnp.isfinite(gmst)
+
+
+def _scalar_tt_ut1(ctimes, dut1s):
+    out = []
+    for c, d in zip(ctimes, dut1s):
+        t1, t2 = ctime2jdtt(float(c))
+        u1, u2 = jdutc2jdut1(CTIME_JD_EPOCH, float(c) / 86400.0, float(d))
+        out.append((float(t1), float(t2), float(u1), float(u2)))
+    return np.array(out).T
+
+
+class TestUtc2TtUt1:
+    """The vectorized conversion must reproduce the scalar ERFA path exactly."""
+
+    # Leap seconds at the end of 2016-12-31, 2015-06-30 and 1972-06-30
+    LEAPS = [1483228800.0, 1435708800.0, 78796800.0]
+
+    def _check(self, ctimes, dut1s):
+        expected = _scalar_tt_ut1(ctimes, dut1s)
+        got = np.array(utc2tt_ut1(np.full_like(ctimes, CTIME_JD_EPOCH),
+                                  ctimes / 86400.0, dut1s))
+        assert_array_equal(got, expected)
+
+    def test_random_times(self):
+        rng = np.random.default_rng(0)
+        ctimes = rng.uniform(1.6e8, 1.9e9, 500)
+        self._check(ctimes, rng.uniform(-0.9, 0.9, ctimes.size))
+
+    def test_across_leap_seconds(self):
+        ctimes = np.concatenate([L + np.arange(-3.0, 3.0, 0.25) for L in self.LEAPS]
+                                + [L - 86400.0 + np.linspace(0, 86399, 50) for L in self.LEAPS])
+        self._check(ctimes, np.full(ctimes.size, 0.3))
+
+    def test_reversed_jd_parts(self):
+        ctimes = np.random.default_rng(1).uniform(1.6e8, 1.9e9, 100)
+        expected = np.array([[float(x) for x in so_pointjax.erfa.taitt(
+            *so_pointjax.erfa.utctai(c / 86400.0, CTIME_JD_EPOCH))] for c in ctimes]).T
+        got = np.array(utc2tt_ut1(ctimes / 86400.0, np.full_like(ctimes, CTIME_JD_EPOCH))[:2])
+        assert_array_equal(got, expected)
+
+    def test_precompute_times(self):
+        ctimes = 1700000000.0 + np.arange(1000) * 0.005
+        times = precompute_times(ctimes, 0.1)
+        expected = _scalar_tt_ut1(ctimes, np.full(ctimes.size, 0.1))
+        for i, k in enumerate(['tt1', 'tt2', 'ut1_1', 'ut1_2']):
+            assert_array_equal(np.asarray(times[k]), expected[i])
+
+    def test_precompute_times_scalar(self):
+        times = precompute_times(1700000000.0)
+        expected = _scalar_tt_ut1(np.array([1700000000.0]), np.zeros(1))
+        assert times['tt2'].shape == ()
+        assert float(times['tt2']) == expected[1, 0]
