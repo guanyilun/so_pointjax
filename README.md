@@ -139,6 +139,9 @@ Key results (CPU, JIT-compiled):
 
 - **Quaternion ops**: 1.3--7x faster than so3g at N >= 100K
 - **Pointing pipeline**: 3--8x faster across all sizes
+- **End-to-end `CelestialSightLine.az_el`** (including time and correction
+  precomputation): ~0.12 s for a 540k-sample TOD vs ~0.35 s for so3g, after a
+  one-time ~1.5 s compile per process
 - **Bore x det composition**: 2--3x faster for realistic focal planes
 - **Gradients**: ~1 us/sample (unique capability vs so3g)
 
