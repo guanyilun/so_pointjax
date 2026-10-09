@@ -12,6 +12,9 @@ Two API levels:
 For vectorized use, precompute times outside vmap, then vmap the _jit functions.
 """
 
+from functools import partial
+
+import jax
 import jax.numpy as jnp
 
 from so_pointjax.qpoint._quaternion import (
@@ -24,7 +27,9 @@ from so_pointjax.qpoint._corrections import (
     aberration, earth_orbital_beta, diurnal_aberration_beta,
     det_offset_quat,
 )
-from so_pointjax.qpoint._time_utils import ctime2jd, ctime2jdtt, jdutc2jdut1
+from so_pointjax.qpoint._time_utils import (
+    ctime2jd, ctime2jdtt, jdutc2jdut1, utc2tt_ut1,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -54,19 +59,7 @@ def precompute_times(ctime, dut1=0.0):
     jd_utc1 = np.full_like(ctime_arr, 2440587.5)
     jd_utc2 = ctime_arr / 86400.0
 
-    tt1 = np.empty_like(ctime_arr)
-    tt2 = np.empty_like(ctime_arr)
-    ut1_1 = np.empty_like(ctime_arr)
-    ut1_2 = np.empty_like(ctime_arr)
-
-    for i in range(len(ctime_arr)):
-        t1, t2 = ctime2jdtt(float(ctime_arr[i]))
-        tt1[i] = float(t1)
-        tt2[i] = float(t2)
-        u1, u2 = jdutc2jdut1(float(jd_utc1[i]), float(jd_utc2[i]),
-                              float(dut1_arr[i]))
-        ut1_1[i] = float(u1)
-        ut1_2[i] = float(u2)
+    tt1, tt2, ut1_1, ut1_2 = utc2tt_ut1(jd_utc1, jd_utc2, dut1_arr)
 
     # Squeeze back to scalar if input was scalar
     if np.ndim(ctime) == 0:
@@ -181,6 +174,17 @@ def azelpsi2bore_jit(az, el, psi, lon, lat,
 # Precomputed slow corrections for vectorized use
 # ---------------------------------------------------------------------------
 
+@partial(jax.jit, static_argnames=('accuracy',))
+def _npb_wobble_batch(tt1, tt2, xp, yp, accuracy=1):
+    """NPB and wobble quaternions for arrays of TT dates (compiled once)."""
+    q_npb = jax.vmap(lambda a, b: npb_quat(a, b, accuracy=accuracy))(tt1, tt2)
+    q_wobble = jax.vmap(lambda a, b: wobble_quat(a, b, xp, yp))(tt1, tt2)
+    return q_npb, q_wobble
+
+
+_earth_orbital_beta_batch = jax.jit(jax.vmap(earth_orbital_beta))
+
+
 def precompute_corrections(ctime, dut1=0.0, accuracy=1, mean_aber=True,
                            xp=0.0, yp=0.0, rate_npb=10.0, rate_aber=10.0):
     """Precompute slow-varying corrections at a coarse cadence.
@@ -225,18 +229,9 @@ def precompute_corrections(ctime, dut1=0.0, accuracy=1, mean_aber=True,
         n_npb = max(1, int(np.ceil((t_end - t_start) / rate_npb)) + 1)
         npb_ctimes = np.linspace(t_start, t_end, n_npb)
         npb_times = precompute_times(npb_ctimes, dut1)
-        # Evaluate NPB at coarse cadence
-        q_npb_arr = jnp.stack([
-            npb_quat(float(npb_times['tt1'][i]), float(npb_times['tt2'][i]),
-                     accuracy=accuracy)
-            for i in range(n_npb)
-        ])
-        # Also wobble at coarse cadence (cheap but might as well)
-        q_wobble_arr = jnp.stack([
-            wobble_quat(float(npb_times['tt1'][i]), float(npb_times['tt2'][i]),
-                        xp, yp)
-            for i in range(n_npb)
-        ])
+        # Evaluate NPB and wobble at coarse cadence
+        q_npb_arr, q_wobble_arr = _npb_wobble_batch(
+            npb_times['tt1'], npb_times['tt2'], xp, yp, accuracy=accuracy)
         # Index mapping: which coarse sample is nearest to each fine sample
         npb_idx = jnp.array(np.round(
             (ctime_arr - t_start) / max(t_end - t_start, 1e-10) * (n_npb - 1)
@@ -254,11 +249,7 @@ def precompute_corrections(ctime, dut1=0.0, accuracy=1, mean_aber=True,
         n_aber = max(1, int(np.ceil((t_end - t_start) / rate_aber)) + 1)
         aber_ctimes = np.linspace(t_start, t_end, n_aber)
         aber_times = precompute_times(aber_ctimes, dut1)
-        beta_arr = jnp.stack([
-            earth_orbital_beta(float(aber_times['tt1'][i]),
-                              float(aber_times['tt2'][i]))
-            for i in range(n_aber)
-        ])
+        beta_arr = _earth_orbital_beta_batch(aber_times['tt1'], aber_times['tt2'])
         aber_idx = jnp.array(np.round(
             (ctime_arr - t_start) / max(t_end - t_start, 1e-10) * (n_aber - 1)
         ).astype(np.int32).clip(0, n_aber - 1))

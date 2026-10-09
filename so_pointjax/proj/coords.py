@@ -107,6 +107,28 @@ def _for_horizon_compute(az, el, roll):
 
 
 @jax.jit
+def _az_el_compute(az, el, roll, tt1, tt2, ut1_1, ut1_2,
+                   q_npb, q_wobble, beta, npb_idx, aber_idx,
+                   lon, lat, weather_A, weather_B):
+    """High-precision pointing, fused into one kernel.  Site and refraction
+    are traced arguments, so this compiles once per input shape, not once
+    per call."""
+    from so_pointjax.qpoint._pointing import azelpsi2bore_fast
+
+    def _single(az_i, el_i, t1, t2, u1, u2, n, w, b):
+        return azelpsi2bore_fast(
+            az_i, el_i, 0.0, lon, lat,
+            t1, t2, u1, u2, n, w, b,
+            weather_A=weather_A, weather_B=weather_B,
+        )
+    q_bore = jax.vmap(_single)(
+        jnp.rad2deg(az), jnp.rad2deg(el), tt1, tt2, ut1_1, ut1_2,
+        q_npb[npb_idx], q_wobble[npb_idx], beta[aber_idx])
+    # Boresight roll + pi rotation (matches so3g convention)
+    return quat.qmul(q_bore, quat.euler(2, jnp.pi + roll))
+
+
+@jax.jit
 def _compute_coords_jit(Q, det_quats):
     """Fused detector coordinate computation."""
     def _det_coords(q_det):
@@ -217,9 +239,7 @@ class CelestialSightLine:
                 "Try 'toco', 'typical', or 'vacuum'."
             )
 
-        from so_pointjax.qpoint._pointing import (
-            precompute_corrections, azelpsi2bore_fast,
-        )
+        from so_pointjax.qpoint._pointing import precompute_corrections
 
         # Parse kwargs
         accuracy = kwargs.get('accuracy', 1)
@@ -228,19 +248,16 @@ class CelestialSightLine:
         t = jnp.asarray(t, dtype=jnp.float64)
         az = jnp.asarray(az, dtype=jnp.float64)
         el = jnp.asarray(el, dtype=jnp.float64)
-
-        # so_pointjax.qpoint expects degrees
-        az_deg = jnp.rad2deg(az)
-        el_deg = jnp.rad2deg(el)
+        if roll is None:
+            roll = jnp.zeros_like(t)
+        else:
+            roll = jnp.asarray(roll, dtype=jnp.float64)
 
         # Use the fast vectorized path: precompute slow corrections, vmap the rest
         import numpy as _np
         corr = precompute_corrections(
             _np.asarray(t), accuracy=accuracy, mean_aber=mean_aber,
         )
-        q_npb_per = corr['q_npb'][corr['npb_idx']]
-        q_wobble_per = corr['q_wobble'][corr['npb_idx']]
-        beta_per = corr['beta_earth'][corr['aber_idx']]
 
         # Compute refraction coefficients if weather provided
         weather_A, weather_B = 0.0, 0.0
@@ -256,32 +273,15 @@ class CelestialSightLine:
                 wavelength,
             )
 
-        @jax.jit
-        def _forward(az_arr, el_arr, tt1, tt2, ut1_1, ut1_2, npb, wob, beta):
-            def _single(az_i, el_i, t1, t2, u1, u2, n, w, b):
-                return azelpsi2bore_fast(
-                    az_i, el_i, 0.0, site.lon, site.lat,
-                    t1, t2, u1, u2, n, w, b,
-                    weather_A=weather_A, weather_B=weather_B,
-                )
-            return jax.vmap(_single)(az_arr, el_arr, tt1, tt2, ut1_1, ut1_2, npb, wob, beta)
-
-        q_bore = _forward(
-            az_deg, el_deg,
+        self = cls()
+        self.Q = _az_el_compute(
+            az, el, roll,
             corr['tt1'], corr['tt2'],
             corr['ut1_1'], corr['ut1_2'],
-            q_npb_per, q_wobble_per, beta_per,
+            corr['q_npb'], corr['q_wobble'], corr['beta_earth'],
+            corr['npb_idx'], corr['aber_idx'],
+            site.lon, site.lat, weather_A, weather_B,
         )
-
-        self = cls()
-
-        # Apply boresight roll + pi rotation (matches so3g convention)
-        if roll is None:
-            self.Q = quat.qmul(q_bore, quat.euler(2, jnp.pi + jnp.zeros_like(t)))
-        else:
-            roll = jnp.asarray(roll, dtype=jnp.float64)
-            self.Q = quat.qmul(q_bore, quat.euler(2, jnp.pi + roll))
-
         return self
 
     @classmethod
