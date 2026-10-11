@@ -41,4 +41,5 @@ testpaths = [
     "so_pointjax/erfa/tests",
     "so_pointjax/qpoint/tests",
     "so_pointjax/proj/tests",
+    "so_pointjax/fit/tests",
 ]
