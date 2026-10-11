@@ -1,40 +1,14 @@
 """Joint fit of pointing and linear amplitudes against sky components.
 
-The model for detector i is
-
-    d_i(t) = sum_k  a_k * m_k(t) * S_k(q_i(t; p)),
-
-where S_k is a sky component evaluated at the detector's sky pointing q_i,
-m_k is an optional time modulation, a_k is a linear amplitude and p holds the
-pointing parameters.  Each component has a scope saying how its amplitude is
-shared:
-
-    'det'      one amplitude per detector (e.g. a gain, or a baseline when
-               S_k is None, meaning a constant)
-    'segment'  one per detector per labelled segment of samples (e.g. per
-               source crossing)
-    'global'   one shared by all detectors
-
-For each trial p, the 'det' and 'segment' amplitudes are solved in closed
-form detector by detector (variable projection).  The 'global' amplitudes
-join p in the Levenberg-Marquardt parameter vector: they enter linearly, so
-Gauss-Newton solves them exactly, and keeping them there leaves the
-detectors independent.  The Jacobian of the profiled residuals comes from
-jax.jacfwd through the offset rotation, detector quaternion, boresight, the
-sky components, an optional linear filter and the linear solve.
-
-Pointing offsets are small rotations in the focal plane, applied between the
-boresight and the detector:
+The model for detector i is d_i(t) = sum_k a_k m_k(t) S_k(q_i(t; p)), with
+sky components S_k, optional modulations m_k, linear amplitudes a_k and
+pointing parameters p entering through
 
     q_i(t) = Q_bore(t) * q_off(p, i, t) * q_det_i.
 
-How p maps to offsets is set by an ``offset_fn``.  `group_offsets` gives one
-(xi, eta) offset per detector group (e.g. per wafer, or one for the array);
-returning per-sample offsets allows time-dependent terms.
-
-Samples can be the full time stream or, faster, only the samples each
-detector spends near the source: pass per-detector sample arrays padded to a
-common length with zero weight, and a per-detector boresight.
+'det' and 'segment' amplitudes are solved in closed form per detector for
+each trial p (variable projection); 'global' amplitudes join p in the
+Levenberg-Marquardt vector.
 """
 
 from typing import Any, Callable, NamedTuple, Optional
@@ -81,7 +55,6 @@ class Template:
         """(east, north) offsets from the centre of pointing quaternions q."""
         q_center = quat.rotation_lonlat(self.lon0, self.lat0)
         xi, eta, _ = quat.decompose_xieta(quat.qmul(quat.qconj(q_center), q))
-        # xi grows toward decreasing longitude (west); eta toward north.
         return -xi, eta
 
     def sample(self, east, north):
@@ -153,15 +126,10 @@ def _scales(M):
 def _solve_local(Cd, Cs, seg, n_seg, w, Y):
     """Weighted least squares for one detector, for several right-hand sides.
 
-    The model is Cd @ a_d plus, for each sample t in segment seg[t],
-    Cs[t] @ a_seg[seg[t]].  Segments share no samples, so the normal matrix
-    is block diagonal in them, bordered by the per-detector columns; the
-    segment blocks are eliminated first and the per-detector amplitudes
-    solved from the Schur complement.  Columns are normalized and a tiny
-    ridge keeps empty or degenerate columns (e.g. a segment with no samples)
-    from making the system singular; their amplitudes come out as 0 with NaN
-    variance.  Returns residuals sqrt(w) (Y - model), a_d (nd, m),
-    a_seg (n_seg, ns, m) and the variances of a_d and a_seg.
+    Model Cd @ a_d + Cs[t] @ a_seg[seg[t]], solved by eliminating the
+    segment blocks and then the Schur complement.  Empty columns get
+    amplitude 0 and NaN variance.  Returns sqrt(w) (Y - model), a_d, a_seg
+    and their variances.
     """
     n_s, nd = Cd.shape
     ns, m = Cs.shape[1], Y.shape[1]
@@ -173,7 +141,7 @@ def _solve_local(Cd, Cs, seg, n_seg, w, Y):
         rhs = Cd.T @ (w[:, None] * Y) / sd[:, None]
     if ns:
         ok = seg >= 0
-        lab = jnp.where(ok, seg, n_seg)  # out of range: dropped by segment_sum
+        lab = jnp.where(ok, seg, n_seg)
         wc = (w * ok)[:, None] * Cs
         M = jax.ops.segment_sum(wc[:, :, None] * Cs[:, None, :], lab, n_seg)
         sk, empty_k = _scales(M)
@@ -252,8 +220,6 @@ def _make_normal_equations(data, weights, Q_bore, det_quats, components,
         return _solve_local(Cd, Cs, segments[i], n_seg, weights[i], Y)
 
     def det_terms(flat, i):
-        # Residuals are linear in the global amplitudes b:
-        # r = R_data - R_G b, so their Jacobian columns are -R_G.
         point, b = flat[:n_point], flat[n_point:]
 
         def resid(pt):
@@ -330,7 +296,7 @@ def fit_joint(data, weights, Q_bore, det_quats, components, params0,
             the weights are not true inverse variances.
         n_pointing : length of the pointing part of the flat vector
         residuals : array (n_det, n_samp), sqrt(weights) * (data - model)
-            at the solution; e.g. for re-estimating the weights
+            at the solution
         chi2, n_iter, converged
     """
     for c in components:
@@ -366,7 +332,7 @@ def fit_joint(data, weights, Q_bore, det_quats, components, params0,
         else:
             lam *= 10
             if lam > 1e12:
-                converged = True  # no further decrease possible
+                converged = True
                 break
 
     cov = np.asarray(jnp.linalg.inv(JtJ))

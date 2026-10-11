@@ -12,7 +12,7 @@ from so_pointjax.fit import (
 )
 
 ARCMIN = np.pi / 180 / 60
-LON0, LAT0 = 1.46, 0.38  # roughly the Crab
+LON0, LAT0 = 1.46, 0.38
 
 
 def _nebula(east, north):
@@ -155,8 +155,6 @@ class TestSegments:
         tmpl = _template()
         Q, q_det, groups, S = _sky(TRUE, tmpl)
         n_det, n_samp = S.shape
-        # One segment per raster row, kept only where the detector sees the
-        # nebula; samples outside every segment get zero weight.
         row = np.repeat(np.arange(30), n_samp // 30)
         seg = np.where(S > 0.02, row[None], -1)
         g = rng.uniform(0.5, 1.5, (n_det, 30))
@@ -173,7 +171,7 @@ class TestSegments:
         np.testing.assert_allclose(res['params'], TRUE, atol=1e-5 * ARCMIN)
         has = np.isfinite(res['amplitude_err']['gain'])
         assert has.sum() > 50
-        g = g[:, :has.shape[1]]  # labels above the highest used are absent
+        g = g[:, :has.shape[1]]
         np.testing.assert_allclose(res['amplitudes']['gain'][has], g[has],
                                    rtol=1e-4)
         assert np.all(np.isnan(res['amplitude_err']['gain'][~has]))
@@ -187,8 +185,6 @@ class TestGlobal:
         P = _sky(TRUE, src)[3]
         n_det, n_samp = S.shape
         gains = rng.uniform(0.5, 1.5, n_det)
-        # Four phase bins of a periodic signal; the source amplitude per bin
-        # is shared by all detectors and scaled by each detector's gain.
         phase_bin = (np.floor(np.arange(n_samp) * 0.37) % 4).astype(int)
         amps = np.array([0.3, 0.0, 0.1, 0.2])
         data = gains[:, None] * (S + amps[phase_bin][None] * P)
@@ -248,7 +244,7 @@ class TestBlockSolve:
         n_s, nd, ns, n_seg, m = 300, 2, 3, 6, 4
         Cd = rng.normal(size=(n_s, nd))
         Cs = rng.normal(size=(n_s, ns))
-        seg = rng.integers(-1, n_seg - 1, n_s)  # label n_seg-1 stays empty
+        seg = rng.integers(-1, n_seg - 1, n_s)
         w = rng.uniform(0.5, 2, n_s)
         Y = rng.normal(size=(n_s, m))
         R, ad, ak, vd, vk = _solve_local(jnp.asarray(Cd), jnp.asarray(Cs),
