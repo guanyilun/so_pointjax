@@ -189,3 +189,23 @@ class TestJaxTransforms:
         ra, dec, pa = jax.vmap(quat2radecpa)(quats)
         assert ra.shape == (5,)
         assert jnp.all(jnp.isfinite(ra))
+
+
+class TestPrecomputeCorrections:
+    """Batched coarse-cadence corrections match per-point evaluation."""
+
+    def test_matches_per_point(self):
+        import numpy as np
+        from so_pointjax.qpoint._pointing import precompute_corrections
+        from so_pointjax.qpoint._corrections import (
+            npb_quat, wobble_quat, earth_orbital_beta,
+        )
+        ctimes = 1700000000.0 + np.arange(0, 120, 0.5)
+        for accuracy in (0, 1):
+            corr = precompute_corrections(ctimes, accuracy=accuracy, xp=0.1, yp=0.2)
+            coarse = precompute_times(np.linspace(ctimes[0], ctimes[-1], len(corr['q_npb'])))
+            for i in range(len(corr['q_npb'])):
+                t1, t2 = float(coarse['tt1'][i]), float(coarse['tt2'][i])
+                assert_allclose(corr['q_npb'][i], npb_quat(t1, t2, accuracy=accuracy), rtol=0, atol=1e-15)
+                assert_allclose(corr['q_wobble'][i], wobble_quat(t1, t2, 0.1, 0.2), rtol=0, atol=1e-15)
+                assert_allclose(corr['beta_earth'][i], earth_orbital_beta(t1, t2), rtol=0, atol=1e-17)
