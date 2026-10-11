@@ -141,21 +141,74 @@ def group_offsets(groups):
     return offset_fn
 
 
-def _solve_local(A, w, y):
-    """Weighted least squares y ~ A a; returns a, var(a), residual.
+_RIDGE = 1e-12
 
-    Columns are normalized before solving, and a tiny ridge keeps empty or
-    degenerate columns (e.g. a segment with no samples) from making the
-    system singular; their amplitudes come out as 0 with NaN variance.
-    """
-    M = (A * w[:, None]).T @ A
-    diag = jnp.diag(M)
+
+def _scales(M):
+    diag = jnp.diagonal(M, axis1=-2, axis2=-1)
     empty = diag <= 0
-    scale = jnp.where(empty, 1.0, jnp.sqrt(jnp.where(empty, 1.0, diag)))
-    Mn = M / jnp.outer(scale, scale) + 1e-12 * jnp.eye(len(diag))
-    a = jnp.linalg.solve(Mn, (A * w[:, None]).T @ y / scale) / scale
-    var = jnp.where(empty, jnp.nan, jnp.diag(jnp.linalg.inv(Mn)) / scale**2)
-    return a, var, jnp.sqrt(w) * (y - A @ a)
+    return jnp.sqrt(jnp.where(empty, 1.0, diag)), empty
+
+
+def _solve_local(Cd, Cs, seg, n_seg, w, Y):
+    """Weighted least squares for one detector, for several right-hand sides.
+
+    The model is Cd @ a_d plus, for each sample t in segment seg[t],
+    Cs[t] @ a_seg[seg[t]].  Segments share no samples, so the normal matrix
+    is block diagonal in them, bordered by the per-detector columns; the
+    segment blocks are eliminated first and the per-detector amplitudes
+    solved from the Schur complement.  Columns are normalized and a tiny
+    ridge keeps empty or degenerate columns (e.g. a segment with no samples)
+    from making the system singular; their amplitudes come out as 0 with NaN
+    variance.  Returns residuals sqrt(w) (Y - model), a_d (nd, m),
+    a_seg (n_seg, ns, m) and the variances of a_d and a_seg.
+    """
+    n_s, nd = Cd.shape
+    ns, m = Cs.shape[1], Y.shape[1]
+    model = jnp.zeros((n_s, m))
+    if nd:
+        D = (Cd * w[:, None]).T @ Cd
+        sd, empty_d = _scales(D)
+        S = D / jnp.outer(sd, sd) + _RIDGE * jnp.eye(nd)
+        rhs = Cd.T @ (w[:, None] * Y) / sd[:, None]
+    if ns:
+        ok = seg >= 0
+        lab = jnp.where(ok, seg, n_seg)  # out of range: dropped by segment_sum
+        wc = (w * ok)[:, None] * Cs
+        M = jax.ops.segment_sum(wc[:, :, None] * Cs[:, None, :], lab, n_seg)
+        sk, empty_k = _scales(M)
+        M_inv = jnp.linalg.inv(M / (sk[:, :, None] * sk[:, None, :])
+                               + _RIDGE * jnp.eye(ns))
+        Yk = jax.ops.segment_sum(wc[:, :, None] * Y[:, None, :], lab, n_seg)
+        MinvY = M_inv @ (Yk / sk[:, :, None])
+    if nd and ns:
+        B = jax.ops.segment_sum(wc[:, None, :] * Cd[:, :, None], lab, n_seg)
+        B = B / (sd[None, :, None] * sk[:, None, :])
+        MinvBt = M_inv @ jnp.swapaxes(B, 1, 2)
+        S = S - jnp.einsum('kds,kse->de', B, MinvBt)
+        rhs = rhs - jnp.einsum('kds,ksm->dm', B, MinvY)
+    if nd:
+        S_inv = jnp.linalg.inv(S)
+        ad_n = S_inv @ rhs
+        ad = ad_n / sd[:, None]
+        vd = jnp.where(empty_d, jnp.nan, jnp.diag(S_inv) / sd**2)
+        model = model + Cd @ ad
+    else:
+        ad, vd = jnp.zeros((0, m)), jnp.zeros(0)
+    if ns:
+        if nd:
+            ak_n = MinvY - MinvBt @ ad_n
+            V = M_inv + MinvBt @ S_inv @ jnp.swapaxes(MinvBt, 1, 2)
+        else:
+            ak_n, V = MinvY, M_inv
+        ak = ak_n / sk[:, :, None]
+        vk = jnp.where(empty_k, jnp.nan,
+                       jnp.diagonal(V, axis1=1, axis2=2) / sk**2)
+        model = model + ok[:, None] * jnp.einsum(
+            'ts,tsm->tm', Cs, ak[jnp.clip(seg, 0)])
+    else:
+        ak, vk = jnp.zeros((n_seg, 0, m)), jnp.zeros((n_seg, 0))
+    return jnp.sqrt(w)[:, None] * (Y - model), ad, ak, vd, vk
 
 
 def _make_normal_equations(data, weights, Q_bore, det_quats, components,
@@ -175,13 +228,13 @@ def _make_normal_equations(data, weights, Q_bore, det_quats, components,
             m = jnp.asarray(c.modulation, dtype=jnp.float64)
             mods.append((lambda i, m=m: m[i]) if m.ndim == 2
                         else (lambda i, m=m: m))
-    if segments is not None:
-        segments = jnp.asarray(segments)
-    local = [k for k, c in enumerate(components) if c.scope != 'global']
-    glob = [k for k, c in enumerate(components) if c.scope == 'global']
+    segments = (jnp.full(data.shape, -1) if segments is None
+                else jnp.asarray(segments))
+    by_scope = {s: [k for k, c in enumerate(components) if c.scope == s]
+                for s in SCOPES}
 
-    def columns(flat, i):
-        off = offset_fn(unravel(flat[:n_point]), i)
+    def columns(point, i):
+        off = offset_fn(unravel(point), i)
         q_det = quat.qmul(offset_quat(off[..., 0], off[..., 1]), det_quats[i])
         q = quat.qmul(bore(i), q_det)
         cols = []
@@ -190,38 +243,38 @@ def _make_normal_equations(data, weights, Q_bore, det_quats, components,
             if mod is not None:
                 col = col * mod(i)
             cols.append(col if filt is None else filt(col))
-        A = []
-        for k in local:
-            if components[k].scope == 'det':
-                A.append(cols[k][:, None])
-            else:
-                onehot = segments[i][:, None] == jnp.arange(n_seg)[None]
-                A.append(cols[k][:, None] * onehot)
-        A = jnp.concatenate(A, axis=1) if A else jnp.zeros((n_samp, 0))
-        G = jnp.stack([cols[k] for k in glob], axis=1) if glob \
-            else jnp.zeros((n_samp, 0))
-        return A, G
+        return [jnp.stack([cols[k] for k in by_scope[s]], axis=1)
+                if by_scope[s] else jnp.zeros((n_samp, 0)) for s in SCOPES]
 
-    def solve(flat, i):
-        A, G = columns(flat, i)
-        y = data[i] - G @ flat[n_point:]
-        if A.shape[1] == 0:
-            return jnp.zeros(0), jnp.zeros(0), jnp.sqrt(weights[i]) * y
-        return _solve_local(A, weights[i], y)
+    def solve(point, i):
+        Cd, Cs, G = columns(point, i)
+        Y = jnp.concatenate([data[i][:, None], G], axis=1)
+        return _solve_local(Cd, Cs, segments[i], n_seg, weights[i], Y)
 
     def det_terms(flat, i):
-        def resid(f):
-            r = solve(f, i)[2]
-            return r, r
-        J, r = jax.jacfwd(resid, has_aux=True)(flat)
-        a, var, _ = solve(flat, i)
-        return r @ r, J.T @ J, J.T @ r, a, var
+        # Residuals are linear in the global amplitudes b:
+        # r = R_data - R_G b, so their Jacobian columns are -R_G.
+        point, b = flat[:n_point], flat[n_point:]
+
+        def resid(pt):
+            out = solve(pt, i)
+            return out[0][:, 0] - out[0][:, 1:] @ b, out
+
+        if n_point:
+            Jp, (R, ad, ak, vd, vk) = jax.jacfwd(resid, has_aux=True)(point)
+        else:
+            R, ad, ak, vd, vk = solve(point, i)
+            Jp = jnp.zeros((n_samp, 0))
+        r = R[:, 0] - R[:, 1:] @ b
+        J = jnp.concatenate([Jp, -R[:, 1:]], axis=1)
+        return (r @ r, J.T @ J, J.T @ r, ad[:, 0] - ad[:, 1:] @ b,
+                ak[..., 0] - ak[..., 1:] @ b, vd, vk)
 
     @jax.jit
     def normal_equations(flat):
-        chi2, JtJ, Jtr, a, var = jax.lax.map(
+        chi2, JtJ, Jtr, ad, ak, vd, vk = jax.lax.map(
             lambda i: det_terms(flat, i), jnp.arange(n_det))
-        return chi2.sum(), JtJ.sum(0), Jtr.sum(0), a, var
+        return chi2.sum(), JtJ.sum(0), Jtr.sum(0), (ad, ak, vd, vk)
 
     return normal_equations
 
@@ -288,15 +341,15 @@ def fit_joint(data, weights, Q_bore, det_quats, components, params0,
         data, weights, Q_bore, det_quats, components, offset_fn, unravel,
         n_point, segments, n_seg, filt)
 
-    chi2, JtJ, Jtr, a, var = normal_equations(flat)
+    chi2, JtJ, Jtr, a = normal_equations(flat)
     converged = False
     for n_iter in range(1, max_iter + 1):
         A = JtJ + lam * jnp.diag(jnp.diag(JtJ))
         trial = flat - jnp.linalg.solve(A, Jtr)
-        chi2_t, JtJ_t, Jtr_t, a_t, var_t = normal_equations(trial)
+        chi2_t, JtJ_t, Jtr_t, a_t = normal_equations(trial)
         if chi2_t < chi2:
             done = (chi2 - chi2_t) <= rtol * chi2
-            flat, chi2, JtJ, Jtr, a, var = trial, chi2_t, JtJ_t, Jtr_t, a_t, var_t
+            flat, chi2, JtJ, Jtr, a = trial, chi2_t, JtJ_t, Jtr_t, a_t
             lam = max(lam / 10, 1e-12)
             if done:
                 converged = True
@@ -308,18 +361,14 @@ def fit_joint(data, weights, Q_bore, det_quats, components, params0,
                 break
 
     cov = np.asarray(jnp.linalg.inv(JtJ))
-    a, var = np.asarray(a), np.asarray(var)
-    amps, amp_err, col = {}, {}, 0
-    for c in components:
-        if c.scope == 'global':
-            continue
-        if c.scope == 'det':
-            amps[c.name], amp_err[c.name] = a[:, col], np.sqrt(var[:, col])
-            col += 1
-        else:
-            amps[c.name] = a[:, col:col + n_seg]
-            amp_err[c.name] = np.sqrt(var[:, col:col + n_seg])
-            col += n_seg
+    ad, ak, vd, vk = (np.asarray(x) for x in a)
+    amps, amp_err = {}, {}
+    det = [c for c in components if c.scope == 'det']
+    seg = [c for c in components if c.scope == 'segment']
+    for j, c in enumerate(det):
+        amps[c.name], amp_err[c.name] = ad[:, j], np.sqrt(vd[:, j])
+    for j, c in enumerate(seg):
+        amps[c.name], amp_err[c.name] = ak[:, :, j], np.sqrt(vk[:, :, j])
     g = np.asarray(flat[n_point:])
     g_err = np.sqrt(np.diag(cov)[n_point:])
     return dict(params=unravel(flat[:n_point]),

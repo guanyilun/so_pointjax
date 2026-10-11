@@ -236,3 +236,31 @@ class TestSelectedSamples:
         assert n_max < 0.5 * S.shape[1]
         np.testing.assert_allclose(res['params'], TRUE, atol=1e-5 * ARCMIN)
         np.testing.assert_allclose(res['gains'], sim['gains'], rtol=1e-5)
+
+
+class TestBlockSolve:
+    def test_matches_dense(self):
+        from so_pointjax.fit.joint import _solve_local
+        rng = np.random.default_rng(5)
+        n_s, nd, ns, n_seg, m = 300, 2, 3, 6, 4
+        Cd = rng.normal(size=(n_s, nd))
+        Cs = rng.normal(size=(n_s, ns))
+        seg = rng.integers(-1, n_seg - 1, n_s)  # label n_seg-1 stays empty
+        w = rng.uniform(0.5, 2, n_s)
+        Y = rng.normal(size=(n_s, m))
+        R, ad, ak, vd, vk = _solve_local(jnp.asarray(Cd), jnp.asarray(Cs),
+                                         jnp.asarray(seg), n_seg,
+                                         jnp.asarray(w), jnp.asarray(Y))
+        used = list(range(n_seg - 1))
+        A = np.concatenate([Cd] + [Cs * (seg == k)[:, None] for k in used], 1)
+        M = (A * w[:, None]).T @ A
+        x = np.linalg.solve(M, (A * w[:, None]).T @ Y)
+        np.testing.assert_allclose(ad, x[:nd], rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(ak[used].reshape(-1, m), x[nd:],
+                                   rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(R, np.sqrt(w)[:, None] * (Y - A @ x),
+                                   rtol=1e-8, atol=1e-10)
+        V = np.diag(np.linalg.inv(M))
+        np.testing.assert_allclose(vd, V[:nd], rtol=1e-6)
+        np.testing.assert_allclose(vk[used].ravel(), V[nd:], rtol=1e-6)
+        assert np.all(np.isnan(vk[n_seg - 1]))
