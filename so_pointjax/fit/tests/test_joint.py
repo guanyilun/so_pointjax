@@ -251,6 +251,7 @@ class TestBlockSolve:
         R, ad, ak, vd, vk = _solve_local(jnp.asarray(Cd), jnp.asarray(Cs),
                                          jnp.asarray(seg), n_seg,
                                          jnp.asarray(w), jnp.asarray(Y))
+        R, ad, ak, vd, vk = (np.asarray(x) for x in (R, ad, ak, vd, vk))
         used = list(range(n_seg - 1))
         A = np.concatenate([Cd] + [Cs * (seg == k)[:, None] for k in used], 1)
         M = (A * w[:, None]).T @ A
