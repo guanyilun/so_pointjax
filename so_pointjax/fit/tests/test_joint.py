@@ -170,6 +170,7 @@ class TestSegments:
         np.testing.assert_allclose(res['params'], TRUE, atol=1e-5 * ARCMIN)
         has = np.isfinite(res['amplitude_err']['gain'])
         assert has.sum() > 50
+        g = g[:, :has.shape[1]]  # labels above the highest used are absent
         np.testing.assert_allclose(res['amplitudes']['gain'][has], g[has],
                                    rtol=1e-4)
         assert np.all(np.isnan(res['amplitude_err']['gain'][~has]))
