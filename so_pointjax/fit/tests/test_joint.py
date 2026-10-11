@@ -132,6 +132,9 @@ class TestFit:
         np.testing.assert_allclose(res['gains'], sim['gains'], rtol=1e-5)
         np.testing.assert_allclose(res['baselines'], sim['baselines'],
                                    atol=1e-5)
+        assert res['residuals'].shape == sim['data'].shape
+        np.testing.assert_allclose(np.sum(res['residuals']**2), res['chi2'],
+                                   rtol=1e-8)
 
     def test_noisy_errors_consistent(self):
         sim = _simulate(TRUE, noise=0.05, seed=1)

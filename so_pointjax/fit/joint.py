@@ -276,7 +276,14 @@ def _make_normal_equations(data, weights, Q_bore, det_quats, components,
             lambda i: det_terms(flat, i), jnp.arange(n_det))
         return chi2.sum(), JtJ.sum(0), Jtr.sum(0), (ad, ak, vd, vk)
 
-    return normal_equations
+    @jax.jit
+    def residuals(flat):
+        def one(i):
+            R = solve(flat[:n_point], i)[0]
+            return R[:, 0] - R[:, 1:] @ flat[n_point:]
+        return jax.lax.map(one, jnp.arange(n_det))
+
+    return normal_equations, residuals
 
 
 def fit_joint(data, weights, Q_bore, det_quats, components, params0,
@@ -322,6 +329,8 @@ def fit_joint(data, weights, Q_bore, det_quats, components, params0,
             order; local amplitudes are marginalized.  Scale by chi2/dof if
             the weights are not true inverse variances.
         n_pointing : length of the pointing part of the flat vector
+        residuals : array (n_det, n_samp), sqrt(weights) * (data - model)
+            at the solution; e.g. for re-estimating the weights
         chi2, n_iter, converged
     """
     for c in components:
@@ -337,7 +346,7 @@ def fit_joint(data, weights, Q_bore, det_quats, components, params0,
     glob = [c for c in components if c.scope == 'global']
     flat = jnp.concatenate([jnp.asarray(point0, dtype=jnp.float64),
                             jnp.zeros(len(glob))])
-    normal_equations = _make_normal_equations(
+    normal_equations, residuals = _make_normal_equations(
         data, weights, Q_bore, det_quats, components, offset_fn, unravel,
         n_point, segments, n_seg, filt)
 
@@ -375,8 +384,8 @@ def fit_joint(data, weights, Q_bore, det_quats, components, params0,
                 globals={c.name: g[k] for k, c in enumerate(glob)},
                 globals_err={c.name: g_err[k] for k, c in enumerate(glob)},
                 amplitudes=amps, amplitude_err=amp_err, cov=cov,
-                n_pointing=n_point, chi2=float(chi2), n_iter=n_iter,
-                converged=converged)
+                n_pointing=n_point, residuals=np.asarray(residuals(flat)),
+                chi2=float(chi2), n_iter=n_iter, converged=converged)
 
 
 def fit_offsets_gains(data, weights, Q_bore, det_quats, template, params0,
