@@ -1,4 +1,4 @@
-"""Tests for so_pointjax.fit.joint on a synthetic, asymmetric nebula."""
+"""Tests for so_pointjax.fit.joint on a synthetic, asymmetric extended source."""
 
 import numpy as np
 import jax
@@ -15,7 +15,7 @@ ARCMIN = np.pi / 180 / 60
 LON0, LAT0 = 1.46, 0.38
 
 
-def _nebula(east, north):
+def _extended(east, north):
     """Two offset Gaussians, so gain and position are not separable."""
     s = 1.2 * ARCMIN
     return (np.exp(-(east**2 + north**2) / (2 * s**2))
@@ -27,7 +27,7 @@ def _template():
     pix = 0.1 * ARCMIN
     x = (np.arange(501) - 250) * pix
     E, N = np.meshgrid(x, x)
-    return Template(_nebula(E, N), LON0, LAT0, pix)
+    return Template(_extended(E, N), LON0, LAT0, pix)
 
 
 def _boresight(n_rows=30, per_row=500, half=12 * ARCMIN, roll=0.3):
@@ -49,7 +49,7 @@ def _focal_plane():
 
 
 def _point_source(east=-2 * ARCMIN, north=-1.5 * ARCMIN):
-    """Narrow Gaussian away from the nebula's centre."""
+    """Narrow Gaussian away from the extended source's centre."""
     pix = 0.1 * ARCMIN
     x = (np.arange(501) - 250) * pix
     E, N = np.meshgrid(x, x)
@@ -107,7 +107,7 @@ class TestTemplate:
     def test_sample_on_grid(self):
         tmpl = _template()
         e, n = np.array([0.3, -1.2]) * ARCMIN, np.array([0.5, 2.0]) * ARCMIN
-        np.testing.assert_allclose(tmpl.sample(e, n), _nebula(e, n),
+        np.testing.assert_allclose(tmpl.sample(e, n), _extended(e, n),
                                    rtol=1e-12)
 
 
@@ -185,14 +185,14 @@ class TestGlobal:
         P = _sky(TRUE, src)[3]
         n_det, n_samp = S.shape
         gains = rng.uniform(0.5, 1.5, n_det)
-        phase_bin = (np.floor(np.arange(n_samp) * 0.37) % 4).astype(int)
+        label = (np.floor(np.arange(n_samp) * 0.37) % 4).astype(int)
         amps = np.array([0.3, 0.0, 0.1, 0.2])
-        data = gains[:, None] * (S + amps[phase_bin][None] * P)
+        data = gains[:, None] * (S + amps[label][None] * P)
         data += rng.normal(0, 1, n_det)[:, None]
         data += noise * rng.normal(size=data.shape)
         comps = [Component('gain', tmpl), Component('baseline')] + [
             Component(f'bin{k}', src, 'global',
-                      gains[:, None] * (phase_bin == k)[None])
+                      gains[:, None] * (label == k)[None])
             for k in range(4)]
         res = fit_joint(data, np.full(data.shape, 1 / noise**2), Q, q_det,
                         comps, jnp.zeros((2, 2)), group_offsets(groups))
