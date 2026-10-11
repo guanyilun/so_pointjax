@@ -76,3 +76,22 @@ class TestPlan94:
             return pv[0, 0]
         g = jax.grad(f)(43999.9)
         assert jnp.isfinite(g)
+
+
+class TestTableCache:
+    """Tables first loaded under jit must not leak tracers into later calls."""
+
+    def test_epv00_first_call_under_jit(self, monkeypatch):
+        from so_pointjax.erfa._core import ephem
+        monkeypatch.setattr(ephem, '_EPV00_TABLES', None)
+        traced = jax.jit(so_pointjax.erfa.epv00)(2400000.5, 53411.52501161)
+        eager = so_pointjax.erfa.epv00(2400000.5, 53411.52501161)
+        assert jnp.allclose(traced[0], eager[0], atol=1e-14)
+
+    def test_nut00a_first_call_under_jit(self, monkeypatch):
+        from so_pointjax.erfa._core import precnut
+        monkeypatch.setattr(precnut, '_nut00a_xls', None)
+        monkeypatch.setattr(precnut, '_nut00a_xpl', None)
+        traced = jax.jit(so_pointjax.erfa.nut00a)(2400000.5, 53736.0)
+        eager = so_pointjax.erfa.nut00a(2400000.5, 53736.0)
+        assert jnp.allclose(traced[0], eager[0], atol=1e-14)

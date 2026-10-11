@@ -655,7 +655,7 @@ def nut00b(date1, date2):
 def _load_nut00a_tables():
     """Load the IAU 2000A nutation coefficient tables from pre-saved .npy files.
 
-    Returns (lunisolar, planetary) as JAX arrays with shapes (678, 11) and (687, 17).
+    Returns (lunisolar, planetary) as NumPy arrays with shapes (678, 11) and (687, 17).
     """
     import os
     import numpy as np
@@ -664,7 +664,7 @@ def _load_nut00a_tables():
     xls_arr = np.load(os.path.join(data_dir, 'nut00a_lunisolar.npy'))
     xpl_arr = np.load(os.path.join(data_dir, 'nut00a_planetary.npy'))
 
-    return jnp.array(xls_arr), jnp.array(xpl_arr)
+    return xls_arr, xpl_arr
 
 
 # Lazily loaded tables
@@ -676,7 +676,7 @@ def _get_nut00a_tables():
     global _nut00a_xls, _nut00a_xpl
     if _nut00a_xls is None:
         _nut00a_xls, _nut00a_xpl = _load_nut00a_tables()
-    return _nut00a_xls, _nut00a_xpl
+    return jnp.asarray(_nut00a_xls), jnp.asarray(_nut00a_xpl)
 
 
 def nut00a(date1, date2):
