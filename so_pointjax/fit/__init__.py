@@ -4,5 +4,6 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 from .joint import (
-    Template, offset_quat, realised_offset, group_offsets, fit_offsets_gains,
+    Template, Component, offset_quat, realised_offset, group_offsets,
+    fit_joint, fit_offsets_gains,
 )

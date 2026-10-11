@@ -7,7 +7,8 @@ import pytest
 
 from so_pointjax.proj import quat
 from so_pointjax.fit import (
-    Template, offset_quat, realised_offset, group_offsets, fit_offsets_gains,
+    Template, Component, offset_quat, realised_offset, group_offsets,
+    fit_joint, fit_offsets_gains,
 )
 
 ARCMIN = np.pi / 180 / 60
@@ -47,19 +48,36 @@ def _focal_plane():
     return quat.rotation_xieta(xi, eta), groups
 
 
+def _point_source(east=-2 * ARCMIN, north=-1.5 * ARCMIN):
+    """Narrow Gaussian away from the nebula's centre."""
+    pix = 0.1 * ARCMIN
+    x = (np.arange(501) - 250) * pix
+    E, N = np.meshgrid(x, x)
+    s = 0.6 * ARCMIN
+    return Template(np.exp(-((E - east)**2 + (N - north)**2) / (2 * s**2)),
+                    LON0, LAT0, pix)
+
+
+def _sky(true_offsets, sky):
+    """Each detector's true sky pointing, and ``sky`` sampled along it."""
+    Q = _boresight()
+    q_det, groups = _focal_plane()
+    S = np.empty((len(groups), len(Q)))
+    for i in range(len(groups)):
+        off = true_offsets[groups[i]]
+        S[i] = sky(quat.qmul(Q, quat.qmul(offset_quat(off[0], off[1]),
+                                          q_det[i])))
+    return Q, q_det, groups, S
+
+
 def _simulate(true_offsets, noise, seed=0):
     rng = np.random.default_rng(seed)
     tmpl = _template()
-    Q = _boresight()
-    q_det, groups = _focal_plane()
+    Q, q_det, groups, S = _sky(true_offsets, tmpl)
     n_det = len(groups)
     gains = rng.uniform(0.5, 1.5, n_det)
     baselines = rng.normal(0, 1, n_det)
-    data = np.empty((n_det, len(Q)))
-    for i in range(n_det):
-        off = true_offsets[groups[i]]
-        q = quat.qmul(Q, quat.qmul(offset_quat(off[0], off[1]), q_det[i]))
-        data[i] = gains[i] * tmpl.sample(*tmpl.sky_offsets(q)) + baselines[i]
+    data = gains[:, None] * S + baselines[:, None]
     data += noise * rng.normal(size=data.shape)
     weights = np.full(data.shape, 1 / noise**2)
     return dict(data=data, weights=weights, Q_bore=Q, det_quats=q_det,
@@ -126,3 +144,94 @@ class TestFit:
         assert np.all(np.abs(gpull) < 5), gpull
         dof = sim['data'].size - 2 * len(sim['gains']) - 4
         assert abs(res['chi2'] / dof - 1) < 0.05
+
+
+class TestSegments:
+    def test_segment_gains_and_offsets(self):
+        rng = np.random.default_rng(2)
+        tmpl = _template()
+        Q, q_det, groups, S = _sky(TRUE, tmpl)
+        n_det, n_samp = S.shape
+        # One segment per raster row, kept only where the detector sees the
+        # nebula; samples outside every segment get zero weight.
+        row = np.repeat(np.arange(30), n_samp // 30)
+        seg = np.where(S > 0.02, row[None], -1)
+        g = rng.uniform(0.5, 1.5, (n_det, 30))
+        b = rng.normal(0, 1, (n_det, 30))
+        lab = np.maximum(seg, 0)
+        data = np.take_along_axis(g, lab, 1) * S + np.take_along_axis(b, lab, 1)
+        weights = np.where(seg >= 0, 1e12, 0.)
+        res = fit_joint(
+            data, weights, Q, q_det,
+            [Component('gain', tmpl, 'segment'), Component('offset', None,
+                                                           'segment')],
+            jnp.zeros((2, 2)), group_offsets(groups), segments=seg)
+        assert res['converged']
+        np.testing.assert_allclose(res['params'], TRUE, atol=1e-5 * ARCMIN)
+        has = np.isfinite(res['amplitude_err']['gain'])
+        assert has.sum() > 50
+        np.testing.assert_allclose(res['amplitudes']['gain'][has], g[has],
+                                   rtol=1e-4)
+        assert np.all(np.isnan(res['amplitude_err']['gain'][~has]))
+
+
+class TestGlobal:
+    def _sim(self, noise, seed):
+        rng = np.random.default_rng(seed)
+        tmpl, src = _template(), _point_source()
+        Q, q_det, groups, S = _sky(TRUE, tmpl)
+        P = _sky(TRUE, src)[3]
+        n_det, n_samp = S.shape
+        gains = rng.uniform(0.5, 1.5, n_det)
+        # Four phase bins of a periodic signal; the source amplitude per bin
+        # is shared by all detectors and scaled by each detector's gain.
+        phase_bin = (np.floor(np.arange(n_samp) * 0.37) % 4).astype(int)
+        amps = np.array([0.3, 0.0, 0.1, 0.2])
+        data = gains[:, None] * (S + amps[phase_bin][None] * P)
+        data += rng.normal(0, 1, n_det)[:, None]
+        data += noise * rng.normal(size=data.shape)
+        comps = [Component('gain', tmpl), Component('baseline')] + [
+            Component(f'bin{k}', src, 'global',
+                      gains[:, None] * (phase_bin == k)[None])
+            for k in range(4)]
+        res = fit_joint(data, np.full(data.shape, 1 / noise**2), Q, q_det,
+                        comps, jnp.zeros((2, 2)), group_offsets(groups))
+        return res, amps
+
+    def test_noiseless(self):
+        res, amps = self._sim(1e-6, 3)
+        assert res['converged']
+        np.testing.assert_allclose(res['params'], TRUE, atol=1e-5 * ARCMIN)
+        got = [res['globals'][f'bin{k}'] for k in range(4)]
+        np.testing.assert_allclose(got, amps, atol=1e-5)
+
+    def test_noisy_errors_consistent(self):
+        res, amps = self._sim(0.05, 4)
+        got = np.array([res['globals'][f'bin{k}'] for k in range(4)])
+        err = np.array([res['globals_err'][f'bin{k}'] for k in range(4)])
+        assert np.all(np.abs((got - amps) / err) < 5), (got - amps) / err
+        assert res['cov'].shape == (8, 8)
+
+
+class TestSelectedSamples:
+    def test_per_detector_selection(self):
+        sim = _simulate(TRUE, noise=1e-6)
+        S = _sky(TRUE, sim['template'])[3]
+        keep = S > 0.01
+        n_max = keep.sum(1).max()
+        n_det = len(S)
+        idx = np.zeros((n_det, n_max), int)
+        w = np.zeros((n_det, n_max))
+        for i in range(n_det):
+            k = np.flatnonzero(keep[i])
+            idx[i, :len(k)] = k
+            w[i, :len(k)] = sim['weights'][i, k]
+        data = np.take_along_axis(sim['data'], idx, 1)
+        Q = np.asarray(sim['Q_bore'])[idx]
+        res = fit_offsets_gains(data, w, Q, sim['det_quats'],
+                                sim['template'], jnp.zeros((2, 2)),
+                                group_offsets(sim['groups']))
+        assert res['converged']
+        assert n_max < 0.5 * S.shape[1]
+        np.testing.assert_allclose(res['params'], TRUE, atol=1e-5 * ARCMIN)
+        np.testing.assert_allclose(res['gains'], sim['gains'], rtol=1e-5)
