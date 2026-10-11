@@ -19,11 +19,18 @@ _EPV00_TABLES = None
 
 
 def _load_epv00_tables():
-    """Load epv00 coefficient arrays from .npy files."""
-    global _EPV00_TABLES
-    if _EPV00_TABLES is not None:
-        return _EPV00_TABLES
+    """epv00 coefficient arrays, read once from .npy files.
 
+    The cache holds NumPy arrays, since a JAX array created while tracing
+    would leak a tracer into later calls.
+    """
+    global _EPV00_TABLES
+    if _EPV00_TABLES is None:
+        _EPV00_TABLES = _read_epv00_tables()
+    return {name: jnp.asarray(a) for name, a in _EPV00_TABLES.items()}
+
+
+def _read_epv00_tables():
     data_dir = os.path.join(os.path.dirname(__file__), '..', '_data')
 
     array_names = [
@@ -38,9 +45,7 @@ def _load_epv00_tables():
     tables = {}
     for name in array_names:
         path = os.path.join(data_dir, f'epv00_{name}.npy')
-        tables[name] = jnp.array(np.load(path))
-
-    _EPV00_TABLES = tables
+        tables[name] = np.load(path)
     return tables
 
 
